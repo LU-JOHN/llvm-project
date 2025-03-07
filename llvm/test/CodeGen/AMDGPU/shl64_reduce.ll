@@ -72,7 +72,6 @@ define i64 @shl_metadata_cant_be_narrowed_to_i32(i64 %arg0, ptr %arg1.ptr) {
   ret i64 %shl
 }
 
-; FIXME: This case should be reduced
 define <2 x i64> @shl_v2_metadata(<2 x i64> %arg0, ptr %arg1.ptr) {
 ; CHECK-LABEL: shl_v2_metadata:
 ; CHECK:       ; %bb.0:
@@ -89,7 +88,6 @@ define <2 x i64> @shl_v2_metadata(<2 x i64> %arg0, ptr %arg1.ptr) {
   ret <2 x i64> %shl
 }
 
-; FIXME: This case should be reduced
 define <3 x i64> @shl_v3_metadata(<3 x i64> %arg0, ptr %arg1.ptr) {
 ; CHECK-LABEL: shl_v3_metadata:
 ; CHECK:       ; %bb.0:
@@ -109,7 +107,6 @@ define <3 x i64> @shl_v3_metadata(<3 x i64> %arg0, ptr %arg1.ptr) {
   ret <3 x i64> %shl
 }
 
-; FIXME: This case should be reduced
 define <4 x i64> @shl_v4_metadata(<4 x i64> %arg0, ptr %arg1.ptr) {
 ; CHECK-LABEL: shl_v4_metadata:
 ; CHECK:       ; %bb.0:
