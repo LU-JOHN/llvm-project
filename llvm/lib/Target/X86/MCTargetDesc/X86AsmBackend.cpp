@@ -540,8 +540,7 @@ void X86AsmBackend::emitInstructionBegin(MCObjectStreamer &OS,
                           isFirstMacroFusibleInst(Inst, *MCII))) {
     // If we meet a unfused branch or the first instuction in a fusiable pair,
     // insert a BoundaryAlign fragment.
-    PendingBA = OS.getContext().allocFragment<MCBoundaryAlignFragment>(
-        AlignBoundary, STI);
+    PendingBA = OS.getContext().allocFragment<MCBoundaryAlignFragment>(AlignBoundary, STI, MCBoundaryAlignFragment::DontCrossBoundary|MCBoundaryAlignFragment::DontEndAgainstBoundary);
     OS.insert(PendingBA);
   }
 }

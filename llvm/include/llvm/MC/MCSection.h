@@ -692,10 +692,10 @@ public:
 };
 
 /// Represents required padding such that a particular other set of fragments
-/// does not cross a particular power-of-two boundary. The other fragments must
+/// does not cross or end against a particular power-of-two boundary. The other fragments must
 /// follow this one within the same section.
 class MCBoundaryAlignFragment : public MCFragment {
-  /// The alignment requirement of the branch to be aligned.
+  /// The alignment requirement of the fragments to be aligned.
   Align AlignBoundary;
   /// The last fragment in the set of fragments to be aligned.
   const MCFragment *LastFragment = nullptr;
@@ -705,11 +705,19 @@ class MCBoundaryAlignFragment : public MCFragment {
 
   /// When emitting Nops some subtargets have specific nop encodings.
   const MCSubtargetInfo &STI;
-
+  
 public:
-  MCBoundaryAlignFragment(Align AlignBoundary, const MCSubtargetInfo &STI)
+  enum : uint8_t {
+    DontCrossBoundary = 0x01u,
+    DontEndAgainstBoundary = 0x02u,
+  };
+
+  // Mask recording if crossing and/or ending at the boundary is forbidden.
+  const uint8_t ForbiddenAlignment;
+  
+  MCBoundaryAlignFragment(Align AlignBoundary, const MCSubtargetInfo &STI, uint8_t ForbiddenAlignment)
       : MCFragment(FT_BoundaryAlign, false), AlignBoundary(AlignBoundary),
-        STI(STI) {}
+        STI(STI), ForbiddenAlignment(ForbiddenAlignment) {}
 
   uint64_t getSize() const { return Size; }
   void setSize(uint64_t Value) { Size = Value; }
