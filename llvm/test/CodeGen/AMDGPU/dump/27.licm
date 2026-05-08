@@ -1,0 +1,21 @@
+; Preheader:
+  %1 = load double, ptr addrspace(7) null, align 8
+  br label %atomicrmw.start
+
+; Loop:
+atomicrmw.start:                                  ; preds = %atomicrmw.start, %0
+  %loaded = phi double [ %1, %0 ], [ %6, %atomicrmw.start ]
+  %2 = call double @llvm.maxnum.f64(double %loaded, double 0.000000e+00)
+  %3 = bitcast double %2 to i64
+  %4 = bitcast double %loaded to i64
+  %5 = cmpxchg ptr addrspace(7) null, i64 %4, i64 %3 monotonic monotonic, align 8
+  %success = extractvalue { i64, i1 } %5, 1
+  %newloaded = extractvalue { i64, i1 } %5, 0
+  %6 = bitcast i64 %newloaded to double
+  br i1 %success, label %atomicrmw.end, label %atomicrmw.start
+
+; Exit blocks
+atomicrmw.end:                                    ; preds = %atomicrmw.start
+  %.lcssa = phi double [ %6, %atomicrmw.start ]
+  ret double %.lcssa
+ANALYSIS:block_cnt 2

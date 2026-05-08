@@ -1,0 +1,21 @@
+  %1 = call double @llvm.amdgcn.raw.ptr.buffer.load.f64(ptr addrspace(8) align 8 null, i32 0, i32 0, i32 0)
+  br label %atomicrmw.start
+
+atomicrmw.start:                                  ; preds = %atomicrmw.start, %0
+  %2 = phi double [ %10, %atomicrmw.start ], [ poison, %0 ]
+  %loaded = phi double [ %1, %0 ], [ %2, %atomicrmw.start ]
+  %3 = call double @llvm.maxnum.f64(double %loaded, double 0.000000e+00)
+  %4 = bitcast double %3 to i64
+  %5 = bitcast double %loaded to i64
+  %6 = call i64 @llvm.amdgcn.raw.ptr.buffer.atomic.cmpswap.i64(i64 %4, i64 %5, ptr addrspace(8) align 8 null, i32 0, i32 0, i32 0)
+  %7 = insertvalue { i64, i1 } poison, i64 %6, 0
+  %8 = icmp eq i64 %6, %5
+  %9 = insertvalue { i64, i1 } %7, i1 %8, 1
+  %success = extractvalue { i64, i1 } %9, 1
+  %newloaded = extractvalue { i64, i1 } %9, 0
+  %10 = bitcast i64 %newloaded to double
+  br i1 %success, label %atomicrmw.end, label %atomicrmw.start
+
+atomicrmw.end:                                    ; preds = %atomicrmw.start
+  ret double %10
+ANALYSIS:block_cnt 2

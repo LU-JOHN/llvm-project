@@ -1,0 +1,22 @@
+define double @buffer_fat_ptr_agent_atomic_fmax_ret_f64__offset__amdgpu_no_fine_grained_memory() #0 {
+  %1 = call double @llvm.amdgcn.raw.ptr.buffer.load.f64(ptr addrspace(8) align 8 null, i32 0, i32 0, i32 0)
+  br label %atomicrmw.start
+
+atomicrmw.start:                                  ; preds = %atomicrmw.start, %0
+  %loaded = phi double [ %1, %0 ], [ %9, %atomicrmw.start ]
+  %2 = call double @llvm.maxnum.f64(double %loaded, double 0.000000e+00)
+  %3 = bitcast double %2 to i64
+  %4 = bitcast double %loaded to i64
+  %5 = call i64 @llvm.amdgcn.raw.ptr.buffer.atomic.cmpswap.i64(i64 %3, i64 %4, ptr addrspace(8) align 8 null, i32 0, i32 0, i32 0)
+  %6 = insertvalue { i64, i1 } poison, i64 %5, 0
+  %7 = icmp eq i64 %5, %4
+  %8 = insertvalue { i64, i1 } %6, i1 %7, 1
+  %success = extractvalue { i64, i1 } %8, 1
+  %newloaded = extractvalue { i64, i1 } %8, 0
+  %9 = bitcast i64 %newloaded to double
+  br i1 %success, label %atomicrmw.end, label %atomicrmw.start
+
+atomicrmw.end:                                    ; preds = %atomicrmw.start
+  ret double %9
+}
+ANALYSIS:block_cnt 2

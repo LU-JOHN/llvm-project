@@ -1,0 +1,5 @@
+define double @buffer_fat_ptr_agent_atomic_fmax_ret_f64__offset__amdgpu_no_fine_grained_memory() #0 {
+  %result = atomicrmw fmax ptr addrspace(7) null, double 0.000000e+00 monotonic, align 8
+  ret double %result
+}
+ANALYSIS:block_cnt 0

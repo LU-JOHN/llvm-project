@@ -1,0 +1,30 @@
+; ModuleID = '<stdin>'
+source_filename = "<stdin>"
+target datalayout = "e-m:e-p:64:64-p1:64:64-p2:32:32-p3:32:32-p4:64:64-p5:32:32-p6:32:32-p7:160:256:256:32-p8:128:128:128:48-p9:192:256:256:32-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-v2048:2048-n32:64-S32-A5-G1-ni:7:8:9"
+target triple = "amdgcn-amd-amdpal"
+
+define double @buffer_fat_ptr_agent_atomic_fmax_ret_f64__offset__amdgpu_no_fine_grained_memory() #0 {
+  %1 = load double, ptr addrspace(7) null, align 8
+  br label %atomicrmw.start
+
+atomicrmw.start:                                  ; preds = %atomicrmw.start, %0
+  %loaded = phi double [ %1, %0 ], [ %6, %atomicrmw.start ]
+  %2 = call double @llvm.maxnum.f64(double %loaded, double 0.000000e+00)
+  %3 = bitcast double %2 to i64
+  %4 = bitcast double %loaded to i64
+  %5 = cmpxchg ptr addrspace(7) null, i64 %4, i64 %3 monotonic monotonic, align 8
+  %success = extractvalue { i64, i1 } %5, 1
+  %newloaded = extractvalue { i64, i1 } %5, 0
+  %6 = bitcast i64 %newloaded to double
+  br i1 %success, label %atomicrmw.end, label %atomicrmw.start
+
+atomicrmw.end:                                    ; preds = %atomicrmw.start
+  ret double %6
+}
+
+; Function Attrs: nocallback nocreateundeforpoison nofree nosync nounwind speculatable willreturn memory(none)
+declare double @llvm.maxnum.f64(double, double) #1
+
+attributes #0 = { "target-cpu"="gfx1200" "target-features"="+real-true16" }
+attributes #1 = { nocallback nocreateundeforpoison nofree nosync nounwind speculatable willreturn memory(none) }
+ANALYSIS:block_cnt 2
