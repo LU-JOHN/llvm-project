@@ -56,6 +56,13 @@ void SSAUpdaterBulk::AddAvailableValue(unsigned Var, BasicBlock *BB, Value *V) {
   Rewrites[Var].Defines.emplace_back(BB, V);
 }
 
+bool SSAUpdaterBulk::HasValueForBlock(unsigned Var, BasicBlock *BB) {
+  for (auto [SearchBB, V] : Rewrites[Var].Defines)
+    if (SearchBB == BB)
+      return true;
+  return false;
+}
+
 /// Record a use of the symbolic value. This use will be updated with a
 /// rewritten value when RewriteAllUses is called.
 void SSAUpdaterBulk::AddUse(unsigned Var, Use *U) {
@@ -270,7 +277,8 @@ static bool replaceIfIdentical(PHINode &PHI, PHINode &ReplPHI) {
 namespace llvm {
 
 bool EliminateNewDuplicatePHINodes(BasicBlock *BB,
-                                   BasicBlock::phi_iterator FirstExistingPN) {
+                                   BasicBlock::phi_iterator FirstExistingPN,
+                                   SmallVectorImpl<PHINode *> *InsertedPHIs) {
   assert(!PHIAreRefEachOther(make_range(BB->phis().begin(), FirstExistingPN)));
 
   // Deduplicate new PHIs first to reduce the number of comparisons on the
@@ -292,12 +300,18 @@ bool EliminateNewDuplicatePHINodes(BasicBlock *BB,
     if (BB->phis().begin() == FirstExistingPN)
       return Changed;
   }
+  if (InsertedPHIs) {
+    for (auto I = BB->phis().begin(); I != FirstExistingPN; ++I) {
+      InsertedPHIs->push_back(&*I);
+    }
+  }
   return Changed;
 }
 
 } // end namespace llvm
 
-static void deduplicatePass(ArrayRef<PHINode *> Worklist) {
+static void deduplicatePass(ArrayRef<PHINode *> Worklist,
+                            SmallVectorImpl<PHINode *> *InsertedPHIs) {
   SmallDenseMap<BasicBlock *, unsigned> BBs;
   for (PHINode *PHI : Worklist) {
     if (PHI)
@@ -306,16 +320,17 @@ static void deduplicatePass(ArrayRef<PHINode *> Worklist) {
 
   for (auto [BB, NumNewPHIs] : BBs) {
     auto FirstExistingPN = std::next(BB->phis().begin(), NumNewPHIs);
-    EliminateNewDuplicatePHINodes(BB, FirstExistingPN);
+    EliminateNewDuplicatePHINodes(BB, FirstExistingPN, InsertedPHIs);
   }
 }
 
-void SSAUpdaterBulk::RewriteAndOptimizeAllUses(DominatorTree &DT) {
+void SSAUpdaterBulk::RewriteAndOptimizeAllUses(
+    DominatorTree &DT, SmallVectorImpl<PHINode *> *InsertedPHIs) {
   SmallVector<PHINode *, 4> PHIs;
   RewriteAllUses(&DT, &PHIs);
   if (PHIs.empty())
     return;
 
   simplifyPass(PHIs, PHIs.front()->getParent()->getDataLayout());
-  deduplicatePass(PHIs);
+  deduplicatePass(PHIs, InsertedPHIs);
 }

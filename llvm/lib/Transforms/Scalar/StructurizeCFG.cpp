@@ -849,7 +849,7 @@ void StructurizeCFG::mergeIfCompatible(
 /// Add the real PHI value as soon as everything is set up
 void StructurizeCFG::setPhiValues() {
   SmallVector<PHINode *, 8> InsertedPhis;
-  SSAUpdater Updater(&InsertedPhis);
+  SSAUpdaterBulk PhiInserter;
   DenseMap<BasicBlock *, SmallVector<BasicBlock *>> UndefBlksMap;
 
   // Find phi nodes that have compatible incoming values (either they have
@@ -919,9 +919,10 @@ void StructurizeCFG::setPhiValues() {
     SmallVector<BasicBlock *> &UndefBlks = UndefBlksMap[To];
     for (const auto &[Phi, Incoming] : Map) {
       Value *Poison = PoisonValue::get(Phi->getType());
-      Updater.Initialize(Phi->getType(), "");
-      Updater.AddAvailableValue(&Func->getEntryBlock(), Poison);
-      Updater.AddAvailableValue(To, Poison);
+      unsigned Variable;
+      Variable = PhiInserter.AddVariable("", Phi->getType());
+      PhiInserter.AddAvailableValue(Variable, &Func->getEntryBlock(), Poison);
+      PhiInserter.AddAvailableValue(Variable, To, Poison);
 
       // Use leader phi's incoming if there is.
       auto LeaderIt = PhiClasses.findLeader(Phi);
@@ -933,7 +934,7 @@ void StructurizeCFG::setPhiValues() {
 
       SmallVector<BasicBlock *> ConstantPreds;
       for (const auto &[BB, V] : IncomingMap) {
-        Updater.AddAvailableValue(BB, V);
+        PhiInserter.AddAvailableValue(Variable, BB, V);
         if (isa<Constant>(V))
           ConstantPreds.push_back(BB);
       }
@@ -947,18 +948,20 @@ void StructurizeCFG::setPhiValues() {
                    [&](BasicBlock *CP) { return DT->dominates(CP, UB); }))
           continue;
         // Maybe already get a value through sharing with other phi nodes.
-        if (Updater.HasValueForBlock(UB))
-          continue;
 
-        Updater.AddAvailableValue(UB, Poison);
+        if (PhiInserter.HasValueForBlock(Variable, UB))
+          continue;
+        PhiInserter.AddAvailableValue(Variable, UB, Poison);
       }
 
-      for (BasicBlock *FI : From)
-        Phi->setIncomingValueForBlock(FI, Updater.GetValueAtEndOfBlock(FI));
+      for (BasicBlock *FI : From) {
+        unsigned Idx = Phi->getBasicBlockIndex(FI);
+        PhiInserter.AddUse(Variable, &Phi->getOperandUse(Idx));
+      }
       AffectedPhis.push_back(Phi);
     }
   }
-
+  PhiInserter.RewriteAndOptimizeAllUses(*DT, &InsertedPhis);
   AffectedPhis.append(InsertedPhis.begin(), InsertedPhis.end());
 }
 

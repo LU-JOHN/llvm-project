@@ -64,6 +64,10 @@ public:
   /// the specified value.
   LLVM_ABI void AddAvailableValue(unsigned Var, BasicBlock *BB, Value *V);
 
+  /// Return true if the SSAUpdaterBulk already has a value for the specified
+  /// block.
+  LLVM_ABI bool HasValueForBlock(unsigned Var, BasicBlock *BB);
+
   /// Record a use of the symbolic value. This use will be updated with a
   /// rewritten value when RewriteAllUses is called.
   LLVM_ABI void AddUse(unsigned Var, Use *U);
@@ -81,7 +85,12 @@ public:
 
   /// Rewrite all uses and simplify the inserted PHI nodes.
   /// Use this method to preserve behavior when replacing SSAUpdater.
-  LLVM_ABI_FOR_TEST void RewriteAndOptimizeAllUses(DominatorTree &DT);
+  /// If a nonnull pointer to a vector
+  /// InsertedPHIs is passed, all the new phi-nodes will be added to this
+  /// vector.
+  LLVM_ABI_FOR_TEST void
+  RewriteAndOptimizeAllUses(DominatorTree &DT,
+                            SmallVectorImpl<PHINode *> *InsertedPHIs = nullptr);
 };
 
 LLVM_ABI_FOR_TEST bool
