@@ -435,11 +435,164 @@ TEST(SSAUpdaterBulk, PHIUseInDefBlock) {
   EXPECT_EQ(Loaded->getIncomingValueForBlock(Loop), Poison);
 }
 
+// Test that AddUse on a PHI incoming operand where the incoming block is a def
+// block (but NOT the phi's own parent block) does not insert a spurious phi in
+// that def block.
+//
+// CFG:  entry -> pred -> loop -> exit
+//                  ^______/
+//
+// Variable has poison at entry and a real value V at pred. The phi in loop
+// has its pred-incoming slot registered as a use. Without the UsingBlocks fix,
+// pred would enter UsingBlocks, and the IDF would insert a spurious phi in pred
+// even though the live-out value V is already directly available there.
+TEST(SSAUpdaterBulk, PHIUseInNonSelfLoopDefBlock) {
+  const char *IR = R"(
+      define i32 @main(i32 %v) {
+      entry:
+          br label %pred
+      pred:
+          br label %loop
+      loop:
+          %phi = phi i32 [ 0, %pred ], [ %phi, %loop ]
+          br i1 true, label %exit, label %loop
+      exit:
+          ret i32 %phi
+      }
+  )";
+
+  llvm::LLVMContext Context;
+  llvm::SMDiagnostic Err;
+  std::unique_ptr<llvm::Module> M = llvm::parseAssemblyString(IR, Err, Context);
+  ASSERT_NE(M, nullptr) << "Failed to parse IR: " << Err.getMessage();
+
+  Function *F = M->getFunction("main");
+  Argument *V = &*F->arg_begin();
+  BasicBlock *Entry = &F->getEntryBlock();
+  BasicBlock *Pred = Entry->getSingleSuccessor();
+  BasicBlock *Loop = Pred->getSingleSuccessor();
+  PHINode *Phi = cast<PHINode>(&Loop->front());
+
+  // Rewrite the pred-incoming slot of %phi. pred is a def block (has value V).
+  SSAUpdaterBulk Updater;
+  Type *I32Ty = Type::getInt32Ty(Context);
+  Value *Poison = PoisonValue::get(I32Ty);
+  unsigned Var = Updater.AddVariable("x", I32Ty);
+  Updater.AddAvailableValue(Var, Entry, Poison); // entry: poison
+  Updater.AddAvailableValue(Var, Pred, V);       // pred: V  (pred is a def block)
+
+  int Idx = Phi->getBasicBlockIndex(Pred);
+  ASSERT_GE(Idx, 0);
+  Updater.AddUse(Var, &Phi->getOperandUse(Idx));
+
+  SmallVector<PHINode *, 4> Inserted;
+  DominatorTree DT(*F);
+  Updater.RewriteAllUses(&DT, &Inserted);
+
+  // The pred-incoming slot must be set directly to V, with no phi inserted in
+  // pred. Without the UsingBlocks fix, pred would be in UsingBlocks, causing
+  // the IDF to insert a spurious phi in pred (which already has V as live-out).
+  EXPECT_TRUE(Inserted.empty()) << "Spurious phi inserted in def block pred";
+  EXPECT_EQ(Phi->getIncomingValueForBlock(Pred), V);
+}
+
+// Test that cross-variable duplicate PHIs are correctly deduplicated when
+// blocks are processed in dominator-tree preorder.
+//
+// Two variables each insert identical phis in Flow and Flow1:
+//   Flow:  %a = phi [%val, %bb4], [poison, %header]   (Var 0)
+//          %b = phi [%val, %bb4], [poison, %header]   (Var 1, identical to %a)
+//   Flow1: %p = phi [%v1, %header], [%a, %Flow]       (Var 0, refs %a)
+//          %q = phi [%v1, %header], [%b, %Flow]       (Var 1, refs %b)
+//
+// After deduplication of Flow (%b RAUW'd to %a), %q's incoming from Flow
+// becomes %a. Then Flow1 deduplication sees %p == %q and removes one.
+// Without DT ordering, Flow1 may be processed before Flow, leaving %p and %q
+// referencing different pointers (%a vs %b) and NOT being deduplicated.
+TEST(SSAUpdaterBulk, CrossVariableDeduplicationOrdering) {
+  const char *IR = R"(
+      define void @test(float %val, float %v1) {
+      entry:
+          br label %header
+      header:
+          br i1 true, label %bb4, label %Flow
+      bb4:
+          br label %Flow
+      Flow:
+          br label %Flow1
+      Flow1:
+          br label %header
+      }
+  )";
+
+  llvm::LLVMContext Context;
+  llvm::SMDiagnostic Err;
+  std::unique_ptr<llvm::Module> M = llvm::parseAssemblyString(IR, Err, Context);
+  ASSERT_NE(M, nullptr) << "Failed to parse IR: " << Err.getMessage();
+
+  Function *F = M->getFunction("test");
+  Argument *Val = &*F->arg_begin();
+  Argument *V1 = &*std::next(F->arg_begin());
+  BasicBlock *Entry = &F->getEntryBlock();
+  BasicBlock *Header = Entry->getSingleSuccessor();
+  BasicBlock *BB4 = Header->getTerminator()->getSuccessor(0);
+  BasicBlock *Flow = BB4->getSingleSuccessor();
+  BasicBlock *Flow1 = Flow->getSingleSuccessor();
+
+  Type *F32Ty = Type::getFloatTy(Context);
+  Value *Poison = PoisonValue::get(F32Ty);
+
+  // Add placeholder phis in Flow1 (one per variable, both will use a value
+  // from Flow). We simulate what StructurizeCFG would do: two variables that
+  // independently need the same value (%val) reconstructed at Flow, and the
+  // same value (%v1 or the Flow phi) at Flow1.
+  IRBuilder<> B(Flow1, Flow1->begin());
+  PHINode *PhiP = B.CreatePHI(F32Ty, 2, "p");
+  PhiP->addIncoming(V1, Header);
+  PhiP->addIncoming(Poison, Flow); // placeholder, will be rewritten
+
+  PHINode *PhiQ = B.CreatePHI(F32Ty, 2, "q");
+  PhiQ->addIncoming(V1, Header);
+  PhiQ->addIncoming(Poison, Flow); // placeholder, will be rewritten
+
+  SSAUpdaterBulk Updater;
+
+  // Var 0: %val available at bb4, poison at entry+header. Use: Flow incoming
+  // of PhiP (resolved through Flow where %a = phi[%val, bb4], [poison, header])
+  unsigned Var0 = Updater.AddVariable("a", F32Ty);
+  Updater.AddAvailableValue(Var0, Entry, Poison);
+  Updater.AddAvailableValue(Var0, Header, Poison);
+  Updater.AddAvailableValue(Var0, BB4, Val);
+  Updater.AddUse(Var0, &PhiP->getOperandUse(PhiP->getBasicBlockIndex(Flow)));
+
+  // Var 1: identical available values. Use: Flow incoming of PhiQ.
+  unsigned Var1 = Updater.AddVariable("b", F32Ty);
+  Updater.AddAvailableValue(Var1, Entry, Poison);
+  Updater.AddAvailableValue(Var1, Header, Poison);
+  Updater.AddAvailableValue(Var1, BB4, Val);
+  Updater.AddUse(Var1, &PhiQ->getOperandUse(PhiQ->getBasicBlockIndex(Flow)));
+
+  DominatorTree DT(*F);
+  Updater.RewriteAndOptimizeAllUses(DT);
+
+  // After deduplication, both PhiP and PhiQ must reference the same single
+  // phi in Flow. That means Flow1 should have at most one surviving phi for
+  // the reconstructed value (PhiP or PhiQ, not both).
+  Value *PIncoming = PhiP->getIncomingValueForBlock(Flow);
+  Value *QIncoming = PhiQ->getIncomingValueForBlock(Flow);
+
+  // Both must reference the same value (the surviving Flow phi).
+  EXPECT_EQ(PIncoming, QIncoming)
+      << "Cross-variable phis in Flow1 were not deduplicated: "
+         "DT ordering fix may be missing";
+}
+
 // Helper to run both versions on the same input.
 static void RunEliminateNewDuplicatePHINode(
     const char *AsmText,
     std::function<void(BasicBlock &,
-                       bool(BasicBlock *BB, BasicBlock::phi_iterator))>
+                       bool(BasicBlock *BB, BasicBlock::phi_iterator,
+                            SmallVectorImpl<PHINode *> *))>
         Check) {
   LLVMContext C;
 
@@ -485,7 +638,7 @@ TEST(SSAUpdaterBulk, EliminateNewDuplicatePHINodes_OrderExisting) {
   )", [](BasicBlock &BB, auto *ENDPN) {
     AssertingVH<PHINode> EP0 = getPhi(BB, 2);
     AssertingVH<PHINode> EP1 = getPhi(BB, 3);
-    EXPECT_TRUE(ENDPN(&BB, getPhiIt(BB, 2)));
+    EXPECT_TRUE(ENDPN(&BB, getPhiIt(BB, 2), nullptr));
     // Expected:
     //   %ep0 = phi i32 [ 1, %entry ]
     //   %ep1 = phi i32 [ 1, %entry ]
@@ -515,7 +668,7 @@ TEST(SSAUpdaterBulk, EliminateNewDuplicatePHINodes_OrderNew) {
     AssertingVH<PHINode> NP0 = getPhi(BB, 0);
     AssertingVH<PHINode> EP0 = getPhi(BB, 2);
     AssertingVH<PHINode> EP1 = getPhi(BB, 3);
-    EXPECT_TRUE(ENDPN(&BB, getPhiIt(BB, 2)));
+    EXPECT_TRUE(ENDPN(&BB, getPhiIt(BB, 2), nullptr));
     // Expected:
     //   %np0 = phi i32 [ 1, %entry ]
     //   %ep0 = phi i32 [ 2, %entry ]
@@ -546,7 +699,7 @@ TEST(SSAUpdaterBulk, EliminateNewDuplicatePHINodes_NewRefExisting) {
   )", [](BasicBlock &BB, auto *ENDPN) {
     AssertingVH<PHINode> EP0 = getPhi(BB, 2);
     AssertingVH<PHINode> EP1 = getPhi(BB, 3);
-    EXPECT_TRUE(ENDPN(&BB, getPhiIt(BB, 2)));
+    EXPECT_TRUE(ENDPN(&BB, getPhiIt(BB, 2), nullptr));
     // Expected:
     //   %ep0 = phi i32 [ 1, %entry ], [ %ep0, %testbb ]
     //   %ep1 = phi i32 [ 1, %entry ], [ %ep1, %testbb ]
@@ -574,7 +727,7 @@ TEST(SSAUpdaterBulk, EliminateNewDuplicatePHINodes_ExistingRefNew) {
   )", [](BasicBlock &BB, auto *ENDPN) {
     AssertingVH<PHINode> EP0 = getPhi(BB, 2);
     AssertingVH<PHINode> EP1 = getPhi(BB, 3);
-    EXPECT_TRUE(ENDPN(&BB, getPhiIt(BB, 2)));
+    EXPECT_TRUE(ENDPN(&BB, getPhiIt(BB, 2), nullptr));
     // Expected:
     //   %ep0 = phi i32 [ 1, %entry ], [ %ep0, %testbb ]
     //   %ep1 = phi i32 [ 1, %entry ], [ %ep1, %testbb ]

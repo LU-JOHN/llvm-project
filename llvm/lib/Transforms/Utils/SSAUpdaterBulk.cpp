@@ -18,6 +18,7 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Use.h"
 #include "llvm/IR/Value.h"
+#include "llvm/Transforms/Utils/Local.h"
 
 using namespace llvm;
 
@@ -136,8 +137,20 @@ void SSAUpdaterBulk::RewriteAllUses(DominatorTree *DT,
     IDF.setDefiningBlocks(DefBlocks);
 
     SmallPtrSet<BasicBlock *, 2> UsingBlocks;
-    for (Use *U : R.Uses)
-      UsingBlocks.insert(getUserBB(U));
+    for (Use *U : R.Uses) {
+      auto *User = cast<Instruction>(U->getUser());
+      if (auto *UserPN = dyn_cast<PHINode>(User)) {
+        // For PHI uses the relevant block is the incoming block, not the PHI's
+        // parent. Skip it if it is already a def block: the use will be
+        // rewritten directly to the live-out value there, so adding it to
+        // UsingBlocks would only cause the IDF to insert a spurious phi.
+        BasicBlock *IncomingBB = UserPN->getIncomingBlock(*U);
+        if (!DefBlocks.count(IncomingBB))
+          UsingBlocks.insert(IncomingBB);
+      } else {
+        UsingBlocks.insert(User->getParent());
+      }
+    }
 
     SmallVector<BasicBlock *, 32> IDFBlocks;
     SmallPtrSet<BasicBlock *, 32> LiveInBlocks;
@@ -313,17 +326,53 @@ bool EliminateNewDuplicatePHINodes(BasicBlock *BB,
 
 } // end namespace llvm
 
+// Threshold matching PHICSENumPHISmallSize in Local.cpp.
+static constexpr unsigned PHIDeduplicationSmallSize = 32;
+
 static void deduplicatePass(ArrayRef<PHINode *> Worklist,
-                            SmallVectorImpl<PHINode *> *InsertedPHIs) {
+                            SmallVectorImpl<PHINode *> *InsertedPHIs,
+                            DominatorTree *DT) {
   SmallDenseMap<BasicBlock *, unsigned> BBs;
   for (PHINode *PHI : Worklist) {
     if (PHI)
       ++BBs[PHI->getParent()];
   }
 
-  for (auto [BB, NumNewPHIs] : BBs) {
-    auto FirstExistingPN = std::next(BB->phis().begin(), NumNewPHIs);
-    EliminateNewDuplicatePHINodes(BB, FirstExistingPN, InsertedPHIs);
+  // Process blocks in dominator-tree preorder so that when we deduplicate a
+  // block, all its dominators have already been processed. RAUW from
+  // predecessor-block deduplication propagates into successor PHIs, making
+  // previously non-identical incoming values become identical and allowing
+  // successor-block deduplication to succeed.
+  SmallVector<BasicBlock *, 8> Blocks;
+  Blocks.reserve(BBs.size());
+  for (auto &[BB, _] : BBs)
+    Blocks.push_back(BB);
+  if (DT) {
+    DT->updateDFSNumbers();
+    llvm::sort(Blocks, [&](BasicBlock *A, BasicBlock *B) {
+      return DT->getNode(A)->getDFSNumIn() < DT->getNode(B)->getDFSNumIn();
+    });
+  }
+
+  for (BasicBlock *BB : Blocks) {
+    unsigned NumNewPHIs = BBs[BB];
+    if (NumNewPHIs > PHIDeduplicationSmallSize) {
+      // For blocks with many new PHIs use the set-based O(N) algorithm from
+      // EliminateDuplicatePHINodes instead of the O(N^2)
+      // EliminateNewDuplicatePHINodes.
+      SmallPtrSet<PHINode *, 8> ToRemove;
+      EliminateDuplicatePHINodes(BB, ToRemove);
+      if (InsertedPHIs) {
+        for (PHINode *&PN : *InsertedPHIs)
+          if (ToRemove.count(PN))
+            PN = nullptr;
+      }
+      for (PHINode *PN : ToRemove)
+        PN->eraseFromParent();
+    } else {
+      auto FirstExistingPN = std::next(BB->phis().begin(), NumNewPHIs);
+      EliminateNewDuplicatePHINodes(BB, FirstExistingPN, InsertedPHIs);
+    }
   }
 }
 
@@ -335,5 +384,5 @@ void SSAUpdaterBulk::RewriteAndOptimizeAllUses(
     return;
 
   simplifyPass(PHIs, PHIs.front()->getParent()->getDataLayout());
-  deduplicatePass(PHIs, InsertedPHIs);
+  deduplicatePass(PHIs, InsertedPHIs, &DT);
 }

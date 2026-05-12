@@ -95,7 +95,8 @@ public:
 
 LLVM_ABI_FOR_TEST bool
 EliminateNewDuplicatePHINodes(BasicBlock *BB,
-                              BasicBlock::phi_iterator FirstExistingPN);
+                              BasicBlock::phi_iterator FirstExistingPN,
+                              SmallVectorImpl<PHINode *> *InsertedPHIs = nullptr);
 
 } // end namespace llvm
 
